@@ -135,8 +135,8 @@
         var temp_arr = []
 
         function readr(reader) {
+            // 可以通过设置 strategy 控制每次读取的缓冲区大小
             return reader.read().then(function(result) {
-
                 var chunk = result.value; ///Uint8Array
                 if(error){
                     return reader.cancel();
@@ -151,7 +151,10 @@
                 var temp = new Uint8Array(temp_u8a.length + chunk.length);
                 temp.set(temp_u8a, 0);
                 temp.set(chunk, temp_u8a.length);
+                console.log('debug set', temp, offest, 'bytes');
                 var offest = flvParse.setFlv(temp);
+
+                // temp_u8a 的意义在于，每个 chunk 不一定包含的都是完整 tag，可能最后会有部分不完整数据，需要截取下来和下一个 chunk 拼在一起再送进去
                 temp_u8a = temp.slice(offest);
                 console.log('offest', offest, '数据长度', temp.length)
                 return _this.readr(reader);

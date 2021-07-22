@@ -117,6 +117,7 @@ class MP4Remuxer {
         this._audioSegmentInfoList.clear();
     }
 
+    // >>> 外部调用
     remux(audioTrack, videoTrack) {
         if (!this._onMediaSegment) {
             throw new IllegalStateException('MP4Remuxer: onMediaSegment callback must be specificed!');
@@ -155,7 +156,14 @@ class MP4Remuxer {
         });
     }
 
+    /**
+     * 直播场景 并不一定是从 0 时间开始播放的
+     * 所以当前帧的 dts 要相对于当前视频第一帧的 dts 计算
+     * frameDts - baseDts
+     */
     _calculateDtsBase(audioTrack, videoTrack) {
+        console.log('debug audioTrack', audioTrack.samples[0]);
+        console.log('debug videoTrack', videoTrack.samples[0]);
         if (this._dtsBaseInited) {
             return;
         }
@@ -168,6 +176,8 @@ class MP4Remuxer {
         }
 
         this._dtsBase = Math.min(this._audioDtsBase, this._videoDtsBase);
+        console.log('debug', 'this._audioDtsBase:' + this._audioDtsBase, 'this._videoDtsBase:' + this._videoDtsBase );
+        console.log('debug', 'this._dtsBase:' + this._dtsBase);
         this._dtsBaseInited = true;
     }
 
@@ -391,6 +401,10 @@ class MP4Remuxer {
             return;
         }
 
+        /**
+         * box header: size(4) + type(mdat)(4)
+         * so bytes starts from 8
+         */
         const bytes = 8 + videoTrack.length;
         const mdatbox = new Uint8Array(bytes);
         mdatbox[0] = (bytes >>> 24) & 0xFF;
@@ -408,8 +422,10 @@ class MP4Remuxer {
             const keyframe = avcSample.isKeyframe;
             const originalDts = avcSample.dts - this._dtsBase;
 
+            // TODO: ?
             if (dtsCorrection == undefined) {
                 if (this._videoNextDts == undefined) {
+                    // 一开始
                     if (this._videoSegmentInfoList.isEmpty()) {
                         dtsCorrection = 0;
                     } else {
@@ -528,6 +544,8 @@ class MP4Remuxer {
         track.samples = [];
         track.length = 0;
 
+        // 上面的大段代码主要就是为了计算 dts，给 moof box 使用
+        // onMdiaSegment 在 flv2mp4 赋值
         this._onMediaSegment('video', {
             type: 'video',
             data: this._mergeBoxes(moofbox, mdatbox).buffer,

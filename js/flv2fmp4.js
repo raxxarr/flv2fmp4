@@ -70,16 +70,33 @@ class flv2fmp4 {
      *
      * @memberof flv2fmp4
      */
+
+    /**
+     * 第一波 chunk 中包含整个 flv 的 header
+     */
     setflvBasefrist(arraybuff, baseTime) {
 
         let offset = flvparse.setFlv(new Uint8Array(arraybuff));
+
+        /**
+         * setFlv 后会解析当前 arraybuffer 中的 tag，并放入 arrTag 中
+         */
         if(flvparse.arrTag[0].type!=18){
+
+            /**
+             * 第一个 tag 应当是 Script Data(tag 有三种：audio video script)
+             */
             if(this.error)this.error(new Error('without metadata tag'));
         }
         if (flvparse.arrTag.length > 0) {
+            
+            /**
+             * flvparse 解析完 flv header 后会知道当前流是否包含音视频
+             */
             tagdemux.hasAudio=this.hasAudio = flvparse._hasAudio;
             tagdemux.hasVideo=this.hasVideo = flvparse._hasVideo;
             
+            // TODO: ???
             if (this._tempBaseTime != 0 && this._tempBaseTime == flvparse.arrTag[0].getTime()) {
                 tagdemux._timestampBase = 0;
             }
@@ -112,8 +129,10 @@ class flv2fmp4 {
     /**
      * 不要主动调用这个接口!!!!!!!!!!!!!!!!!!!!!!!!!!!!
      * moof回调
+     * 
+     * setFlv 之后通过 demux remux 会构建 moof，mdat，然后回调这里
      *
-     * @param {any} track
+     * @param {string} track 'video' or 'audio'
      * @param {any} value
      *
      * @memberof flv2fmp4
@@ -121,8 +140,11 @@ class flv2fmp4 {
     onMdiaSegment(track, value) {
 
         if (this.onMediaSegment) {
+            // 外面直接调这个方法，拿到 data 放到 mse(sourcebuffer.appendBuffer())
             this.onMediaSegment(new Uint8Array(value.data));
         }
+
+        
         if (this._pendingResolveSeekPoint != -1 && track == 'video') {
             let seekpoint = this._pendingResolveSeekPoint;
             this._pendingResolveSeekPoint = -1;
@@ -140,6 +162,12 @@ class flv2fmp4 {
      * @param {any} meta
      *
      * @memberof flv2fmp4
+     */
+    /**
+     * 解析完视频 AVCDecoderConfigurationRecord 后会触发，
+     * type: video or audio
+     * meta 就是解析结果
+     * 音频同理
      */
     Metadata(type, meta) {
         switch (type) {
@@ -182,7 +210,18 @@ class flv2fmp4 {
             this.metaSuccRun = true;
             return;
         }
+
+        /**
+         * 音频 视频 config tag 解析完成后都会触发，
+         * 这种情况下只是把数据往外送，不做初始化操作
+         */
         if(mi)return;
+
+        /**
+         * 都解析完成后，开始初始化
+         */
+
+        // >>>>>>>>>
         this.ftyp_moov = mp4remux.generateInitSegment(this.metas);
         if (this.onInitSegment && this.loadmetadata == false) {
 
@@ -194,6 +233,13 @@ class flv2fmp4 {
     onDataAvailable(audiotrack, videotrack) {
         this.m4mof.remux(audiotrack, videotrack);
     }
+
+
+
+    /**
+     * 先通过 setFlv 传入 flv buffer 进行解析
+     * 解析后会触发 _onTrackMetadata  _onMediaInfo _onDataAvailable
+     */
 
     /**
      * 传入flv的二进制数据
@@ -304,8 +350,9 @@ class foreign {
      *
      * @memberof foreign
      */
+
     set onMediaInfo(fun) {
-        this._onMediaInfo = fun;
+        this._onMediaInfo = fun; // 没有用到
         this.f2m.onMediaInfo = fun;
     }
 

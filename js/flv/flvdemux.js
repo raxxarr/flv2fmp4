@@ -77,15 +77,39 @@ export default class flvDemux {
     /**
      * 解析metadata
      */
-    static parseMetadata(arr) {
+    static parseMetadata(arr) { // arr 是 tag body 的 arraybuffer
+
+        /**
+         * 送去解析 tag type 为 script 的 data
+         * 
+         * script tag 包含两个 AMF
+         */
+
+        // 第一个 AMF，解出来就是 NAME=onMetaData
         const name = flvDemux.parseScript(arr, 0);
+        // 第二个 AMF，解出来就是各种元信息键值对
         const value = flvDemux.parseScript(arr, name.size, arr.length - name.size);
-        // return {}
+
         const data = {};
+        /**
+         * data = {
+         *  onMetaData: {
+         *      duration: 41.4,
+         *      framerate: 25.07246376811594,
+         *      filesize: 1994716,
+         *      width: 640,
+         *      ...
+         *  }
+         * }
+         */
         data[name.data] = value.data;
         return data;
     }
 
+    /**
+     * 解析方式具体可参考：https://www.jianshu.com/p/1df4bc217dbd
+     * 所有数据都是以数据类型+（数据长度）+数据的格式出现的，数据类型占1byte，数据长度看数据类型是否存在，后面才是数据。
+     */
     static parseScript(arr, offset, dataSize) {
         let dataOffset = offset;
         const object = {};
@@ -94,6 +118,10 @@ export default class flvDemux {
         const dv = new DataView(buffer, 0, dataSize);
         let value = null;
         let objectEnd = false;
+
+        /**
+         * 第一个字节是数据类型 type
+         */
         const type = (dv.getUint8(dataOffset));
         dataOffset += 1;
 
@@ -141,6 +169,13 @@ export default class flvDemux {
                     }
                     break;
                 }
+
+            /**
+             * 解析出来是键值对：
+             * width=xxx
+             * duration=xxx
+             * ...
+             */
             case 8:
                 { // ECMA array type (Mixed array)
                     value = {};

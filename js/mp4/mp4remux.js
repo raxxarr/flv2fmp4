@@ -45,6 +45,9 @@ class MP4 {
 
         for (const name in MP4.types) {
             if (MP4.types.hasOwnProperty(name)) {
+                /**
+                 * 把 utf-8 的 type name 转换成 unicode 整数（0-65535）
+                 */
                 MP4.types[name] = [
                     name.charCodeAt(0),
                     name.charCodeAt(1),
@@ -54,8 +57,17 @@ class MP4 {
             }
         }
 
+        /**
+         * 定义一些 iso bmff 的固定常量
+         * 如：major_band 一定是 isom
+         */
         const constants = MP4.constants = {};
 
+        /**
+         * Uint8Array: 无符号 8 位整数数组
+         * - 数组的每个元素是 8 位，即 1 个字节，用 16 进制表示
+         * 这里直接用 16 进制表示好内容，可以直接给 mse 读取使用
+         */
         constants.FTYP = new Uint8Array([
             0x69, 0x73, 0x6F, 0x6D, // major_brand: isom		isom	MP4  Base Media v1 [IS0 14496-12:2003]	ISO	YES	video/mp4
             0x0, 0x0, 0x0, 0x1, // minor_version: 0x01
@@ -130,32 +142,144 @@ class MP4 {
     }
 
     /**
+     * full box 组成如下:4字节长度+4字节box type+1字节版本+3字节保留位+各种box特有内容
+     * 标准的box开头的4个字节（32位）为box size，该大小包括box header和box body整个box的大小，这样我们就可以在文件中定位各个box。如果size为1，则表示这个box的大小为large size，真正的size值要在largesize域上得到。（实际上只有“mdat”类型的box才有可能用到large size。）如果size为0，表示该box为文件的最后一个box，文件结尾即为该box结尾。（同样只存在于“mdat”类型的box中。）
+     * size后面紧跟的32位为box type，一般是4个字符，如“ftyp”、“moov”等，这些box type都是已经预定义好的，分别表示固定的意义。如果是“uuid”，表示该box为用户扩展类型。如果box type是未定义的，应该将其忽略。
+     */
+
+    /**
      * 封装box
+     * e.g 创建 ftyp box：4字节长度+4字节’ftyp’+FTYP对象,就是完整的ftyp box
+     * MP4.box(MP4.types.ftyp, MP4.constants.FTYP);
+     * MP4.types.ftyp = [102, 116, 121, 112]; (converted by charCodeAt()), 4字节
+     * MP4.constants.FTYP = (search above 'constants.FTYP ='),16字节，包含 major_band/minor_version/ismo avc1
      */
     static box(type) {
+        // box 初始化大小，单位-字节，即默认先 8 个字节，后面会增长
         let size = 8;
         let result = null;
+        // 拿出第二个参数
         const datas = Array.prototype.slice.call(arguments, 1);
+        // datas = [param1, param2, param3,...]
+        // e.g datas[0] = [,,,,,] FTYP, 16 字节（Uint8Array，16个元素，每个元素8bits即1字节）
+        // 一个 container box 可能由多个 box 构成，因此这里会有多个参数，也会有嵌套
+        // 所以 datas 可以理解为直接子 box 的数组
         const arrayCount = datas.length;
+        // -> arrayCount = 1
 
         for (let i = 0; i < arrayCount; i++) {
+            // 计算每个 data 的字节长度，加在 size 上面，用来确定给 box 分配的空间（new Uint8Array(size)）
+            // 从默认的 8 个字节开始增长
             size += datas[i].byteLength;
+            // datas[i].byteLength = 16
+            // size = 8+16 = 24
         }
-        // box头部大小
-        result = new Uint8Array(size);
+
+
+        result = new Uint8Array(size); // e.g 分配长度为 24 的数组，共 24 字节
+
+        /**
+         * -------- 接下来两部分代码是构建 header 部分 --------
+         * 每一个 box 都有 header
+         * 每一个 header 都由 size 和 type 构成
+         * size: 32bits 4bytes
+         * type: 32bits 4bytes
+         */
+
+        /**
+         * ---- header.size ----
+         */
+
+        /**
+         * size 总长度为 4 个字节（32位），不会超过这个长度
+         * 总共可以表示 0到4294967295，也就是最大可以表示 4294967295bytes大的box
+         * 注意：4294967295 是一个十进制的数字，当他表示 size 的时候，我们给他的含义是字节
+         * 当前 ftyp box 总长度为 24bytes
+         * 
+         * 四个字节，需要分配到 Unit8Array 中，也就是每个字节一个元素
+         * size >>> 24，代表无符号右移 3 个字节
+         * 我们可以先假设 size = [a,b,c,d]
+         * 那么 size >>> 24，就是只剩下 size 的第一个字节部分 a
+         * 然后把它分配到 result 的第一个元素
+         * 
+         * 24 转为2进制 11000
+         * 11000 是5bits，不到一个字节
+         * 但是 size 是定长的，4个字节，因此我们把 24 表示在 4 个字节的空间中：
+         * 00000000(alias: a) 00000000(alias: b) 00000000(alias:c) 00011000(alias: d)
+         * 
+         * size >>> 8，表示把上面的数据向右移动 8 bits，左边多出来的 0 补位：
+         * 00000000(补位) 00000000(alias: a) 00000000(alias: b) 00000000(alias:c)
+         * 也就是把 d 段移走，左边补一段0
+         * 最终取值为 0 ，赋值给 result[2]
+         * 
+         * size >>> 16，表示把原始数据向右移动 16 bits，左边多出来的 0 补位：
+         * 00000000(补位) 00000000(补位) 00000000(alias: a) 00000000(alias: b)
+         * 也就是把 c、d 段移走，左边补两段0
+         * 最终取值为 0 ，赋值给 result[2]
+         * 
+         * size >>> 24，表示把原始数据向右移动 24 bits，左边多出来的 0 补位：
+         * 00000000(补位) 00000000(补位) 00000000(补位) 00000000(alias: a) 
+         * 也就是把 b、c、d 段移走，左边补三段0
+         * 最终取值为 0 ，赋值给 result[0]
+         * 
+         * size，表示不移位，即原始数据
+         * 00000000(alias: a) 00000000(alias: b) 00000000(alias:c) 00011000(alias: d)
+         * 取值为 00011000，转化为 10 进制就是 24 ，赋值给 result[0]
+         * 
+         * 因此，最终的 ftyp 这个 box 的 size 字段为：[0,0,0,24]
+         * 代表这个 ftyp box 总长度为 24 bytes
+         */
         result[0] = (size >>> 24) & 0xFF; // size
         result[1] = (size >>> 16) & 0xFF;
         result[2] = (size >>> 8) & 0xFF;
         result[3] = (size) & 0xFF;
-        // 写入box的type
-        result.set(type, 4); // type
+        
 
+        /**
+         * ---- header.type ----
+         */
+
+        // 写入box的type
+        // b.set(a, from): 复制 type 的内容到 result，从result[4]开始往后写
+
+        /**
+         * 写入box的type
+         * 也就是把 't' 'y' 'p' 'e' 这四个字母的 charCode 值继续写入 result，每个字母占一个字节（一个中文是2个字节-unicode中）
+         */
+        result.set(type, 4); // type，type 统一占 4 个字节
+
+        /**
+         * -------- 接下来就是写 box 内容了 --------
+         * 如果是 container box 则只有 header 没有内容
+         */
+
+        /**
+         * 根据上面，result 已经占了 8 个字节：
+         * size 占 4 字节
+         * ftyp 每个字母一个字节，共 4 字节
+         * 那么剩下的内容就要从第 9 个字节开始往后写
+         * 
+         * 如果是 fullbox，其实接下来 4 个字节都是 version(1)+flags(3)，只不过如果是 container box，接下来就是其他 box 了
+         */
         let offset = 8;
         for (let i = 0; i < arrayCount; i++) { // data body
-            result.set(datas[i], offset);
+            /**
+             * e.g 这里只有 datas[0]，内容就是 ftyp 对象内容（major_brand 等，一共 16 字节）
+             */
+            result.set(datas[i], offset); // 前 8 个字节被占用了
             offset += datas[i].byteLength;
         }
 
+        /**
+         * 至此，result 一共 4(size) + 4(ftyp) + 16(ftyp对象) = 24 字节
+         * 整个 ftyp box 一共 24 个字节
+         */
+
+        /**
+         * size: [0,0,0,24] (24)
+         * ftyp: [102, 116, 121, 112] (ftyp charcode)
+         * ftyp constants 16bytes
+         */
         return result;
     }
 
@@ -187,6 +311,17 @@ class MP4 {
     }
 
     // Movie header box
+
+    /**
+     * timescale is an integer that specifies the time‐scale for the entire presentation; this is the
+     *  number of time units that pass in one second. For example, a time coordinate system that
+     *  measures time in sixtieths of a second has a time scale of 60.
+     */
+    /**
+     * timescale 是一秒的刻度值，如果 timescale = 60，那么 1 秒分成 60 份，如果 timescale = 1000，那么代表的刻度就是毫秒
+     * duration 以 timescale 为单位，总共的时长。
+     * 如 duration = 10000， timescale = 1000，那么媒体总时长就是 duration/timescale 秒。10000/1000 = 10秒
+     */
     static mvhd(timescale, duration) {
         return MP4.box(MP4.types.mvhd, new Uint8Array([
             0x00, 0x00, 0x00, 0x00, // version(0) + flags     1位的box版本+3位flags   box版本，0或1，一般为0。（以下字节数均按version=0）

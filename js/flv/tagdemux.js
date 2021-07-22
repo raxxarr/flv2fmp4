@@ -9,8 +9,22 @@ class tagDemux {
         this._config = {};
 
         this._onError = null;
+
+        /**
+         * script tag、音频 AudioSpecificConfig、视频 AVCDecoderConfigurationRecord
+         * 都解析完成后，触发 _onMediaInfo
+         * 
+         * 对初始化信息进行 remux，生成 initSegment，开始送入 sourceBuffer
+         */
         this._onMediaInfo = null;
+
         this._onTrackMetadata = null;
+
+        /**
+         * 初始化之后，每一批 tags（大小取决于当前读取的文件 chunk）解析完都会触发
+         * 带着本次解析的 videoTrack 和 audioTrack 上的 samples
+         * 如每次 200 帧音频，120 帧视频，没一帧上有 dts cts pts
+         */
         this._onDataAvailable = null;
 
         this._dataOffset = 0;
@@ -23,15 +37,28 @@ class tagDemux {
         this._audioInitialMetadataDispatched = false;
         this._videoInitialMetadataDispatched = false;
 
+        /**
+         * 通过解 script data tag 取得
+         * 
+         * 同时通过解音视频相关 tag 得出其他一些信息：
+         * 解 AVCDecoderConfigurationRecord 取得 width / height / videoCodec / fps 等
+         */
         this._mediaInfo = new mediainfo();
         this._mediaInfo.hasAudio = this._hasAudio;
         this._mediaInfo.hasVideo = this._hasVideo;
         this._metadata = null;
         this._audioMetadata = null;
+
+        /**
+         * 通过解 AVCVideoPackage 类型为 0 的 package 即 AVCDecoderConfigurationRecord 取得
+         * 主要是 sps
+         * (pps 没用?)
+         */
         this._videoMetadata = null;
 
         this._naluLengthSize = 4;
         this._timestampBase = 0; // int32, in milliseconds
+        // TODO: why 1000？
         this._timescale = 1000;
         this._duration = 0; // int32, in milliseconds
         this._durationOverrided = false;
@@ -42,6 +69,9 @@ class tagDemux {
             fps_den: 1000
         };
 
+        /**
+         * flv 只支持单 track 吧？
+         */
         this._videoTrack = { type: 'video', id: 1, sequenceNumber: 0, addcoefficient: 2, samples: [], length: 0 };
         this._audioTrack = { type: 'audio', id: 2, sequenceNumber: 1, addcoefficient: 2, samples: [], length: 0 };
 
@@ -61,7 +91,18 @@ class tagDemux {
         this._onMediaInfo = callback;
     }
     parseMetadata(arr) {
+        /**
+         * flvDemux 的作用是按字节解析 flv 封装数据
+         */
+        /**
+         * flvDemux.parseMetadata 解析 scriptData 内容
+         * 解出来就是 metaData
+         */
         const data = flvDemux.parseMetadata(arr);
+
+        /**
+         * 把解析的 metaData 放到 _mediaInfo 上
+         */
         this._parseScriptData(data);
         console.log(this._mediaInfo, this._mediaInfo.isComplete());
     }
@@ -75,6 +116,9 @@ class tagDemux {
             this._metadata = scriptData;
             const onMetaData = this._metadata.onMetaData;
 
+            /**
+             * onMetaData 就是从 script tag 解出来的各种元数据
+             */
             if (typeof onMetaData.hasAudio === 'boolean') { // hasAudio
                 this._hasAudio = onMetaData.hasAudio;
                 this._mediaInfo.hasAudio = this._hasAudio;
@@ -118,6 +162,13 @@ class tagDemux {
             if (typeof onMetaData.keyframes === 'object') { // keyframes
                 this._mediaInfo.hasKeyframesIndex = true;
                 const keyframes = onMetaData.keyframes;
+                /**
+                 * times: [0, 0, 10, 20, 30, 40, 41.4]
+                 * maybe 关键帧出现的时间
+                 * 
+                 * filepositions:  [794, 859, 393677, 869269, 1366083, 1889745, 1994696]
+                 * maybe 关键帧出现在文件中的字节 offset（该文件filesize: 1994716，可以对上）
+                 */
                 keyframes.times = onMetaData.times;
                 keyframes.filepositions = onMetaData.filepositions;
                 this._mediaInfo.keyframesIndex = this._parseKeyframesIndex(keyframes);
@@ -154,6 +205,7 @@ class tagDemux {
 
     /**
      * 传入tags输出moof和mdat
+     * 同时解析 meta data
      *
      * @param {any} tags
      *
@@ -173,21 +225,32 @@ class tagDemux {
         }
     }
 
+    /**
+     * 单位为 1 个 tag
+     */
     parseChunks(flvtag) {
 
         switch (flvtag.tagType) {
             case 8: // Audio
+                // TODO:
                 this._parseAudioData(flvtag.body.buffer, 0, flvtag.body.length, flvtag.getTime());
                 break;
             case 9: // Video
+                /**
+                 * 解析 video tag，包括 record nalu 和 普通 nalu
+                 */
                 this._parseVideoData(flvtag.body.buffer, 0, flvtag.body.length, flvtag.getTime(), 0);
                 break;
             case 18: // ScriptDataObject
                 this.parseMetadata(flvtag.body);
+                // 注意这里解析完后没有触发 _onMediaInfo，那是在之后触发的
                 break;
         }
     }
 
+    /**
+     * 解析一个 video tag
+     */
     _parseVideoData(arrayBuffer, dataOffset, dataSize, tagTimestamp, tagPosition) {
         if (tagTimestamp == this._timestampBase && this._timestampBase != 0) {
             console.log(tagTimestamp, this._timestampBase, '夭寿啦这个视频不是从0开始');
@@ -204,6 +267,7 @@ class tagDemux {
         // 获取编码格式
         const codecId = spec & 15;
 
+        // 7 = avc
         if (codecId !== 7) {
             if(this._onError)
             this._onError(`Flv: Unsupported codec in video frame: ${codecId}`);
@@ -234,6 +298,18 @@ class tagDemux {
         //  Composition time offset
         // ELSE
         //  0
+
+        /**
+         * 关于 CTS：
+         * For FLV, the Timestamp (FLV spec p.69) tells when the frame should be fed to the decoder in milliseconds, which is
+         *  timestamp = DTS / 90.0
+         * The CompositionTime (FLV spec p.72) tells the renderer when to perform (“compose”) the video frame on the display device in milliseconds after it enters the decoder; thus it is
+         *  compositionTime = (PTS – DTS) / 90.0
+         * 
+         * DTS 是数据送入 decoder 的时间
+         * CTS 是送入 decoder 之后多久需要渲染（“compose”）出来
+         * 所以 CTS 就是 DTS 到 PTS 之间的 duration
+         */
         const cts = v.getUint32(0, !le) & 0x00FFFFFF;
 
         // IF AVCPacketType == 0 AVCDecoderConfigurationRecord（AVC sequence header）
@@ -249,6 +325,7 @@ class tagDemux {
         if (packetType === 0) { // AVCDecoderConfigurationRecord
             this._parseAVCDecoderConfigurationRecord(arrayBuffer, dataOffset + 4, dataSize - 4);
         } else if (packetType === 1) { // One or more Nalus
+            // TODO: 
             this._parseAVCVideoData(arrayBuffer, dataOffset + 4, dataSize - 4, tagTimestamp, tagPosition, frameType, cts);
         } else if (packetType === 2) {
             // empty, AVC end of sequence
@@ -276,7 +353,9 @@ class tagDemux {
             meta = this._videoMetadata = {};
             meta.type = 'video';
             meta.id = track.id;
+            // timescale 目前写死了 10000
             meta.timescale = this._timescale;
+            // duration 是从 script tag 中解出来的 onMetaData
             meta.duration = this._duration;
         } else {
             if (typeof meta.avcc !== 'undefined') {
@@ -294,12 +373,14 @@ class tagDemux {
             return;
         }
 
+        // 3 -> binary -> 00000011
         this._naluLengthSize = (v.getUint8(4) & 3) + 1; // lengthSizeMinusOne
         if (this._naluLengthSize !== 3 && this._naluLengthSize !== 4) { // holy shit!!!
             this._onError(DemuxErrors.FORMAT_ERROR, `Flv: Strange NaluLengthSizeMinusOne: ${this._naluLengthSize - 1}`);
             return;
         }
 
+        // 32 -> binary -> 00011111
         const spsCount = v.getUint8(5) & 31; // numOfSequenceParameterSets
         if (spsCount === 0 || spsCount > 1) {
             this._onError(DemuxErrors.FORMAT_ERROR, `Flv: Invalid H264 SPS count: ${spsCount}`);
@@ -307,6 +388,8 @@ class tagDemux {
         }
 
         let offset = 6;
+
+        console.log('debug spsCount', spsCount)
 
         for (let i = 0; i < spsCount; i++) {
             const len = v.getUint16(offset, !le); // sequenceParameterSetLength
@@ -321,6 +404,7 @@ class tagDemux {
             offset += len;
 
             const config = SPSParser.parseSPS(sps);
+            console.log('debug sps', config)
             meta.codecWidth = config.codec_size.width;
             meta.codecHeight = config.codec_size.height;
             meta.presentWidth = config.present_size.width;
@@ -343,6 +427,7 @@ class tagDemux {
             const fps_num = meta.frameRate.fps_num;
             meta.refSampleDuration = Math.floor(meta.timescale * (fps_den / fps_num));
 
+
             const codecArray = sps.subarray(1, 4);
             let codecString = 'avc1.';
             for (let j = 0; j < 3; j++) {
@@ -352,6 +437,11 @@ class tagDemux {
                 }
                 codecString += h;
             }
+
+            console.log('debug codecString', codecString);
+            /**
+             * codecString 例如：avc1.64001e
+             */
             meta.codec = codecString;
 
             const mi = this._mediaInfo;
@@ -397,6 +487,12 @@ class tagDemux {
             offset += len;
         }
 
+        /**
+         * avcC 是 H264 码流的一种封装方式，对 NALU 的分割是在每个 NALU 前面加上 NALU 长度，以及头部是 extdadata(包含 sps pps)
+         * 另一种格式 Annex-B，对 NALU 的分割方式是在每个 NALU 前面加上 0000 或者 0001（注意防竞争处理）
+         * 
+         * 这里就是把原始数据放到 meta.avcc 中
+         */
         meta.avcc = new Uint8Array(dataSize);
         meta.avcc.set(new Uint8Array(arrayBuffer, dataOffset, dataSize), 0);
         console.log(this.TAG, 'Parsed AVCDecoderConfigurationRecord');
@@ -407,6 +503,9 @@ class tagDemux {
                 this._onDataAvailable(this._audioTrack, this._videoTrack);
             }
         } else {
+            /**
+             * 表示视频初始化完成，还要等音频初始化完成才会触发上面的 _isInitialMetadataDispatched() => true
+             */
             this._videoInitialMetadataDispatched = true;
         }
         // notify new metadata
@@ -415,6 +514,7 @@ class tagDemux {
         //     this._onTrackMetadata.call(null, meta);
         // }
 
+        // TODO: 配合音频一起看下这之后会触发什么
         this._onTrackMetadata('video', meta);
     }
 
@@ -424,6 +524,11 @@ class tagDemux {
 
     /**
      * 普通的AVC 片段
+     * 
+     * 一个 tag 是一帧，一帧有多个 NAL Unit 构成
+     * 
+     * 解析 avcPacket，按照 tag 也就是帧为维度放入 _videoTrack.samples
+     * 一个 sample 代表一帧，每个 sample 有 dts cts 及 nalu原始数据（要送入解码器的视频数据）
      */
     _parseAVCVideoData(arrayBuffer, dataOffset, dataSize, tagTimestamp, tagPosition, frameType, cts) {
 
@@ -434,31 +539,69 @@ class tagDemux {
             length = 0;
 
         let offset = 0;
+
+        /**
+         * avcC 的 NALU 组织形式是 naluLength + naluData，一般 naluLength 占 4 字节
+         */
         const lengthSize = this._naluLengthSize;
+
+        /**
+         * tagTimestamp 就是当前 tag 的 timestamp，即送入解码器的时间，DTS
+         */
         const dts = this._timestampBase + tagTimestamp;
         let keyframe = (frameType === 1); // from FLV Frame Type constants
 
+        // TODO: 
+
+        /**
+         * 从 0 开始，一直读取到 dataSize
+         */
         while (offset < dataSize) {
+
+            /**
+             * 起码要有 nalusize（4字节） 和 naludata
+             */
             if (offset + 4 >= dataSize) {
                 console.log(this.TAG, `Malformed Nalu near timestamp ${dts}, offset = ${offset}, dataSize = ${dataSize}`);
                 break; // data not enough for next Nalu
             }
+
             // Nalu with length-header (AVC1)
+            /**
+             * 先按照 4 字节取
+             */
             let naluSize = v.getUint32(offset, !le); // Big-Endian read
+            /**
+             * 如果是 3 字节，右移一个字节修正取值
+             * 得出当前 Nalu 长度
+             */
             if (lengthSize === 3) {
                 naluSize >>>= 8;
             }
+
+            /**
+             * naluSize 必须等于（只剩一个 nalu）或者小于（还有多个 nalu） dataSize - lengthSize
+             */
             if (naluSize > dataSize - lengthSize) {
                 console.log(this.TAG, `Malformed Nalus near timestamp ${dts}, NaluSize > DataSize!`);
                 return;
             }
 
+            /**
+             * 取 nalu 第一个字节
+             */
             const unitType = v.getUint8(offset + lengthSize) & 0x1F;
 
+            /**
+             * 6-sei 7-sps 8-pps
+             */
             if (unitType === 5) { // IDR
                 keyframe = true;
             }
 
+            /**
+             * 保存 nalu 原始值（包含 naluSize）
+             */
             const data = new Uint8Array(arrayBuffer, dataOffset + offset, lengthSize + naluSize);
             const unit = { type: unitType, data };
             units.push(unit);
@@ -498,6 +641,10 @@ class tagDemux {
         let meta = this._audioMetadata;
         const track = this._audioTrack;
 
+        /**
+         * 每个 flv audio tag 的第一个字节 always 是 meta 信息
+         * 只在第一次解析就好了
+         */
         if (!meta || !meta.codec) {
             // initial metadata
             meta = this._audioMetadata = {};
@@ -509,6 +656,13 @@ class tagDemux {
             const le = this._littleEndian;
             const v = new DataView(arrayBuffer, dataOffset, dataSize);
 
+            /**
+             * soundSpec 结构：
+             * SoundFormat(4bits) (AAC=10)
+             * SoundRate(2bits) (xxkHz)
+             * SoundSize(1bit) (xx-bit)
+             * SoundType(1bit) (1-Stereo)
+             */
             const soundSpec = v.getUint8(0);
 
             const soundFormat = soundSpec >>> 4;
@@ -518,6 +672,11 @@ class tagDemux {
                 return;
             }
 
+            /**
+             * 采样率
+             * 固定的几个值（soundRateTable）
+             * 解码出 index 从 table 中取
+             */
             let soundRate = 0;
             const soundRateIndex = (soundSpec & 12) >>> 2;
 
@@ -539,6 +698,10 @@ class tagDemux {
             meta.codec = 'mp4a.40.5';
         }
 
+        // 跳过第一个字节 meta
+        /**
+         * aacDate 可能是 aac sequence header（AudioSpecificConfig）也可能是 raw data
+         */
         const aacData = this._parseAACAudioData(arrayBuffer, dataOffset + 1, dataSize - 1);
         if (aacData == undefined) {
             return;
@@ -603,9 +766,15 @@ class tagDemux {
         const result = {};
         const array = new Uint8Array(arrayBuffer, dataOffset, dataSize);
 
+        /**
+         * AACPacketType 1bytes 0-AAC sequence header 1-AAC raw
+         */
         result.packetType = array[0];
 
         if (array[0] === 0) {
+            /**
+             * 解析 aac sequence header，得到音频配置：采样率、codec 等
+             */
             result.data = this._parseAACAudioSpecificConfig(arrayBuffer, dataOffset + 1, dataSize - 1);
         } else {
             result.data = array.subarray(1);
